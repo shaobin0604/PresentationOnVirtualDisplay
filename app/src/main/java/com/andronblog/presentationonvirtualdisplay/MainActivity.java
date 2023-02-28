@@ -4,13 +4,22 @@ import android.app.Activity;
 import android.app.Presentation;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.ImageFormat;
+import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
 import android.media.MediaRouter;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Bundle;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Display;
@@ -26,6 +35,13 @@ import android.view.animation.AnimationUtils;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 
 public class MainActivity extends Activity {
 
@@ -51,6 +67,10 @@ public class MainActivity extends Activity {
     private Button mButtonCreate;
     private Button mButtonDestroy;
 
+    private ImageReader mImageReader;
+
+    private Handler mHandler;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -58,6 +78,10 @@ public class MainActivity extends Activity {
 
         SurfaceView surfaceView = (SurfaceView) findViewById(R.id.surfaceView);
         mSurface = surfaceView.getHolder().getSurface();
+
+        final HandlerThread handlerThread = new HandlerThread("virtual display dump");
+        handlerThread.start();
+        mHandler = new Handler(handlerThread.getLooper());
 
         // Obtain display metrics of current display to know its density (dpi)
         WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
@@ -146,6 +170,14 @@ public class MainActivity extends Activity {
 
     private void stopScreenCapture() {
         destroyVirtualDisplay();
+
+        if (mImageReader != null) {
+            mImageReader.setOnImageAvailableListener(null, null);
+            mImageReader.close();
+        }
+        if (mBitmap != null) {
+            mBitmap = null;
+        }
     }
 
     @Override
@@ -183,15 +215,52 @@ public class MainActivity extends Activity {
 
     private void createVirtualDisplay() {
         if (mProjection != null && mVirtualDisplay == null) {
+
+            mImageReader = ImageReader.newInstance(mWidth, mHeight, PixelFormat.RGBA_8888, 2);
+            mImageReader.setOnImageAvailableListener(imageReader -> {
+                final Image image = imageReader.acquireLatestImage();
+                writeImage(image);
+                image.close();
+            }, mHandler);
+
             Log.d(TAG, "createVirtualDisplay WxH (px): " + mWidth + "x" + mHeight +
                     ", dpi: " + mMetrics.densityDpi);
             int flags = DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
             //flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
             mVirtualDisplay = mProjection.createVirtualDisplay("MyVirtualDisplay",
-                    mWidth, mHeight, mMetrics.densityDpi, flags, mSurface,
+                    mWidth, mHeight, mMetrics.densityDpi, flags, mImageReader.getSurface(),
                     null /*Callbacks*/, null /*Handler*/);
             mButtonCreate.setEnabled(false);
             mButtonDestroy.setEnabled(true);
+        }
+    }
+
+    private long mCount;
+
+    private Bitmap mBitmap;
+
+    // ref: https://myenv.net/blog/przechwytywanie-ekranu-za-pomoca-mediaprojection/
+    private void writeImage(Image image) {
+        mCount++;
+        Log.v(TAG, "writeImage - count: " + mCount);
+
+        final Image.Plane[] planes = image.getPlanes();
+        final ByteBuffer buffer = planes[0].getBuffer();
+        final int pixelStride = planes[0].getPixelStride();
+        final int rowStride = planes[0].getRowStride();
+        final int rowPadding = rowStride - pixelStride * mWidth;
+
+        if (mBitmap == null) {
+            mBitmap = Bitmap.createBitmap(mWidth + rowPadding / pixelStride, mHeight, Bitmap.Config.ARGB_8888);
+        }
+
+        mBitmap.copyPixelsFromBuffer(buffer);
+
+        try (final FileOutputStream fos = new FileOutputStream(
+                new File(Environment.getExternalStorageDirectory(), "virtual_display_" + mCount + ".jpg"))) {
+            mBitmap.compress(Bitmap.CompressFormat.JPEG, 100, fos);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
     }
 
